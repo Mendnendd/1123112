@@ -369,7 +369,7 @@ class SpotTradingAPI {
         }
         
         if ($signed) {
-            $params['timestamp'] = round(microtime(true) * 1000);
+            $params['timestamp'] = (string)round(microtime(true) * 1000);
             $params['recvWindow'] = 5000;
         }
         
@@ -393,8 +393,8 @@ class SpotTradingAPI {
             CURLOPT_URL => $method === 'GET' ? $url . '?' . $queryString : $url,
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_HTTPHEADER => $headers,
-            CURLOPT_TIMEOUT => 15,
-            CURLOPT_CONNECTTIMEOUT => 5,
+            CURLOPT_TIMEOUT => 8,
+            CURLOPT_CONNECTTIMEOUT => 3,
             CURLOPT_SSL_VERIFYPEER => true,
             CURLOPT_USERAGENT => 'Binance AI Trader/2.0',
             CURLOPT_FOLLOWLOCATION => false,

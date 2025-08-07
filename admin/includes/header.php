@@ -31,7 +31,7 @@ try {
     }
     
     // Only try to get account info if credentials are configured
-    if ($binance->hasCredentials()) {
+    if ($binance && $binance->hasCredentials()) {
         try {
             $balance = $binance->getAccountInfo();
             
@@ -56,6 +56,7 @@ try {
     error_log("Header API error: " . $e->getMessage());
     $totalBalance = 0;
     $totalPnL = 0;
+    $binance = null;
 }
 ?>
 <header class="admin-header">

@@ -68,12 +68,18 @@ $pairs = $db->fetchAll("SELECT * FROM trading_pairs WHERE (trading_type = 'FUTUR
 // Get current positions
 try {
     $positions = $binance->getPositions();
-    $activePositions = array_filter($positions, function($pos) {
-        return (float)$pos['positionAmt'] != 0;
-    });
+    if (is_array($positions)) {
+        $activePositions = array_filter($positions, function($pos) {
+            return (float)($pos['positionAmt'] ?? 0) != 0;
+        });
+    } else {
+        $activePositions = [];
+    }
 } catch (Exception $e) {
     $activePositions = [];
-    $error = 'Failed to load positions: ' . $e->getMessage();
+    if (!isset($error)) {
+        $error = 'Failed to load positions: ' . $e->getMessage();
+    }
 }
 
 // Get account balance
@@ -94,7 +100,27 @@ try {
 }
 
 // Get settings
-$settings = $db->fetchOne("SELECT * FROM trading_settings WHERE id = 1");
+try {
+    $settings = $db->fetchOne("SELECT * FROM trading_settings WHERE id = 1");
+    if (!$settings) {
+        // Create default settings if none exist
+        $db->insert('trading_settings', [
+            'id' => 1,
+            'testnet_mode' => 1,
+            'trading_enabled' => 0,
+            'ai_enabled' => 1,
+            'spot_trading_enabled' => 1,
+            'futures_trading_enabled' => 1
+        ]);
+        $settings = $db->fetchOne("SELECT * FROM trading_settings WHERE id = 1");
+    }
+} catch (Exception $e) {
+    error_log("Error loading settings: " . $e->getMessage());
+    $settings = [
+        'futures_trading_enabled' => 1,
+        'testnet_mode' => 1
+    ];
+}
 ?>
 <!DOCTYPE html>
 <html lang="en">
