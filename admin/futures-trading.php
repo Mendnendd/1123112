@@ -75,9 +75,15 @@ try {
     } else {
         $activePositions = [];
     }
+        });
+    } else {
+        $activePositions = [];
+    }
 } catch (Exception $e) {
     $activePositions = [];
     if (!isset($error)) {
+        $error = 'Failed to load positions: ' . $e->getMessage();
+    }
         $error = 'Failed to load positions: ' . $e->getMessage();
     }
 }
@@ -101,6 +107,26 @@ try {
 
 // Get settings
 try {
+    $settings = $db->fetchOne("SELECT * FROM trading_settings WHERE id = 1");
+    if (!$settings) {
+        // Create default settings if none exist
+        $db->insert('trading_settings', [
+            'id' => 1,
+            'testnet_mode' => 1,
+            'trading_enabled' => 0,
+            'ai_enabled' => 1,
+            'spot_trading_enabled' => 1,
+            'futures_trading_enabled' => 1
+        ]);
+        $settings = $db->fetchOne("SELECT * FROM trading_settings WHERE id = 1");
+    }
+} catch (Exception $e) {
+    error_log("Error loading settings: " . $e->getMessage());
+    $settings = [
+        'futures_trading_enabled' => 1,
+        'testnet_mode' => 1
+    ];
+}
     $settings = $db->fetchOne("SELECT * FROM trading_settings WHERE id = 1");
     if (!$settings) {
         // Create default settings if none exist
@@ -188,12 +214,17 @@ try {
                             </div>
                         </div>
                         
-                        <div class="form-row">
-                            <div class="form-group">
-                                <label for="type">Order Type</label>
-                                <select id="type" name="type" required>
-                                    <option value="MARKET">Market</option>
-                                    <option value="LIMIT">Limit</option>
+                        try {
+                            $recentFuturesTrades = $db->fetchAll("
+                                SELECT * FROM trading_history 
+                                WHERE trading_type = 'FUTURES' 
+                                ORDER BY created_at DESC 
+                                LIMIT 10
+                            ");
+                        } catch (Exception $e) {
+                            error_log("Error loading recent futures trades: " . $e->getMessage());
+                            $recentFuturesTrades = [];
+                        }
                                 </select>
                             </div>
                             

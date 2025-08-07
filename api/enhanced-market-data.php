@@ -24,12 +24,31 @@ try {
     $binance = new BinanceAPI();
     $spotAPI = new SpotTradingAPI();
     
+    // Check if API credentials are available
+    if (!$binance->hasCredentials()) {
+        // Return cached data or mock data if no credentials
+        echo json_encode([
+            'success' => true,
+            'prices' => [],
+            'timestamp' => time(),
+            'cached' => true,
+            'message' => 'API credentials not configured'
+        ]);
+        exit;
+    }
+    
     // Get active trading pairs
-    $pairs = $db->fetchAll("SELECT symbol FROM trading_pairs WHERE enabled = 1 LIMIT 10");
+    $pairs = $db->fetchAll("SELECT symbol FROM trading_pairs WHERE enabled = 1 LIMIT 5");
     
     $prices = [];
+    $processedCount = 0;
+    $maxPairs = 5; // Limit for performance
     
     foreach ($pairs as $pair) {
+        if ($processedCount >= $maxPairs) {
+            break;
+        }
+        
         try {
             // Get futures data
             $futuresTicker = $binance->get24hrTicker($pair['symbol']);
@@ -52,7 +71,14 @@ try {
             }
             
             // Get spot data
-            $spotTicker = $spotAPI->getSpotTicker($pair['symbol']);
+            $spotTicker = [];
+            try {
+                $spotTicker = $spotAPI->getSpotTicker($pair['symbol']);
+            } catch (Exception $e) {
+                // Skip spot data if not available
+                error_log("Spot ticker not available for {$pair['symbol']}: " . $e->getMessage());
+            }
+            
             $spotData = [
                 'price' => 0,
                 'change' => 0,
@@ -79,6 +105,8 @@ try {
                     (abs($futuresData['price'] - $spotData['price']) / $spotData['price']) * 100 : 0
             ];
             
+            $processedCount++;
+            
         } catch (Exception $e) {
             error_log("Error fetching enhanced market data for {$pair['symbol']}: " . $e->getMessage());
             // Skip this symbol on timeout/error to avoid blocking other symbols
@@ -99,7 +127,7 @@ try {
     // Cache the data
     try {
         $cacheData = json_encode($prices);
-        $expiresAt = date('Y-m-d H:i:s', time() + 30); // Cache for 30 seconds
+        $expiresAt = date('Y-m-d H:i:s', time() + 60); // Cache for 60 seconds
         
         $db->query("
             INSERT INTO market_data_cache (symbol, data_type, data, expires_at) 

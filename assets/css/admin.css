@@ -10,6 +10,26 @@ body {
     background-color: #f8fafc;
     color: #334155;
     line-height: 1.6;
+    /* Optimize rendering performance */
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeSpeed;
+}
+
+/* Performance optimizations */
+.chart-card .card-content,
+.dashboard-card .card-content {
+    will-change: transform;
+    transform: translateZ(0);
+}
+
+/* Reduce animations on slower devices */
+@media (prefers-reduced-motion: reduce) {
+    * {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+    }
 }
 
 /* Layout */
@@ -27,6 +47,8 @@ body {
     padding: 0 20px;
     z-index: 1000;
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+    /* Performance optimization */
+    will-change: transform;
 }
 
 .admin-sidebar {

@@ -78,8 +78,9 @@ function updateDashboard() {
 }
 
 // Auto-refresh dashboard every 30 seconds
-if (window.location.pathname.includes('index.php')) {
-    setInterval(updateDashboard, 30000);
+if (window.location.pathname.includes('index.php') || window.location.pathname.endsWith('/admin/')) {
+    // Reduce auto-refresh frequency to improve performance
+    setInterval(updateDashboard, 60000); // Changed from 30s to 60s
 }
 
 // Confirmation dialogs
@@ -88,6 +89,22 @@ function confirmAction(message, callback) {
         callback();
     }
 }
+
+// Debounce function for performance
+function debounce(func, wait) {
+    let timeout;
+    return function executedFunction(...args) {
+        const later = () => {
+            clearTimeout(timeout);
+            func(...args);
+        };
+        clearTimeout(timeout);
+        timeout = setTimeout(later, wait);
+    };
+}
+
+// Optimized price update function
+const debouncedPriceUpdate = debounce(updatePriceDisplay, 1000);
 
 // Copy to clipboard
 function copyToClipboard(text) {

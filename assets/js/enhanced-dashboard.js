@@ -191,25 +191,26 @@ class EnhancedDashboard {
     }
     
     startLiveUpdates() {
-        // Update market data every 10 seconds
+        // Reduce update frequency for better performance
+        // Update market data every 30 seconds (was 10)
         this.updateIntervals.market = setInterval(() => {
             this.refreshMarketData();
-        }, 10000);
+        }, 30000);
         
-        // Update portfolio data every 30 seconds
+        // Update portfolio data every 60 seconds (was 30)
         this.updateIntervals.portfolio = setInterval(() => {
             this.refreshPortfolioData();
-        }, 30000);
-        
-        // Update charts every 60 seconds
-        this.updateIntervals.charts = setInterval(() => {
-            this.refreshCharts();
         }, 60000);
         
-        // Update notifications every 30 seconds
+        // Update charts every 120 seconds (was 60)
+        this.updateIntervals.charts = setInterval(() => {
+            this.refreshCharts();
+        }, 120000);
+        
+        // Update notifications every 60 seconds (was 30)
         this.updateIntervals.notifications = setInterval(() => {
             this.refreshNotifications();
-        }, 30000);
+        }, 60000);
     }
     
     initializeWebSocket() {
@@ -220,7 +221,8 @@ class EnhancedDashboard {
                 
                 this.websocket.onopen = () => {
                     console.log('WebSocket connected');
-                    this.showNotification('Real-time updates connected', 'success');
+                    // Don't show notification to reduce noise
+                    console.log('Real-time updates connected');
                 };
                 
                 this.websocket.onmessage = (event) => {
@@ -238,7 +240,8 @@ class EnhancedDashboard {
                     console.error('WebSocket error:', error);
                 };
             } catch (error) {
-                console.error('WebSocket connection failed:', error);
+                // Silently fail WebSocket connection to not block page
+                console.log('WebSocket not available, using polling updates');
             }
         }
     }
@@ -269,6 +272,7 @@ class EnhancedDashboard {
     }
     
     refreshMarketData() {
+        // Add timeout and error handling for better performance
         fetch('../api/enhanced-market-data.php')
             .then(response => response.json())
             .then(data => {
@@ -278,8 +282,8 @@ class EnhancedDashboard {
                 }
             })
             .catch(error => {
-                console.error('Error fetching market data:', error);
-                this.showNotification('Failed to update market data', 'error');
+                // Silently handle errors to prevent notification spam
+                console.log('Market data update skipped:', error.message);
             });
     }
     

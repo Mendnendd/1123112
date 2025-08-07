@@ -57,6 +57,7 @@ try {
     $totalBalance = 0;
     $totalPnL = 0;
     $binance = null;
+    $binance = null;
 }
 ?>
 <header class="admin-header">

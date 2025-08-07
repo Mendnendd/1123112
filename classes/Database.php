@@ -6,6 +6,10 @@ class Database {
     
     private function __construct() {
         try {
+            // Set connection timeout for faster failures
+            ini_set('mysql.connect_timeout', 5);
+            ini_set('default_socket_timeout', 5);
+            
             $this->connection = new mysqli(DB_HOST, DB_USER, DB_PASS, DB_NAME);
             
             if ($this->connection->connect_error) {
@@ -13,6 +17,10 @@ class Database {
             }
             
             $this->connection->set_charset(DB_CHARSET);
+            
+            // Optimize connection settings
+            $this->connection->options(MYSQLI_OPT_CONNECT_TIMEOUT, 5);
+            $this->connection->options(MYSQLI_OPT_READ_TIMEOUT, 10);
             
         } catch (Exception $e) {
             error_log("Database connection error: " . $e->getMessage());

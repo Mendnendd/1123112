@@ -1,570 +1,812 @@
 <?php
+require_once '../config/app.php';
 
-class BinanceAPI {
-    private $apiKey;
-    private $apiSecret;
-    private $baseUrl;
-    private $testnet;
-    private $db;
-    
-    public function __construct($testnet = null) {
-        $this->db = Database::getInstance();
-        $this->loadCredentials();
-        
-        // Override testnet setting if provided
-        if ($testnet !== null) {
-            $this->testnet = $testnet;
-        }
-        
-        $this->baseUrl = $this->testnet 
-            ? 'https://testnet.binancefuture.com'
-            : 'https://fapi.binance.com';
-    }
-    
-    private function loadCredentials() {
-        try {
-            $settings = $this->db->fetchOne("SELECT * FROM trading_settings WHERE id = 1");
-            
-            if ($settings) {
-                $this->apiKey = $settings['binance_api_key'];
-                $this->apiSecret = !empty($settings['binance_api_secret']) ? $this->decrypt($settings['binance_api_secret']) : null;
-                $this->testnet = (bool)$settings['testnet_mode'];
-            } else {
-                // Create default settings if none exist
-                $this->db->insert('trading_settings', [
-                    'id' => 1,
-                    'testnet_mode' => 1,
-                    'trading_enabled' => 0,
-                    'ai_enabled' => 1
-                ]);
-                $this->testnet = true;
-                $this->apiKey = null;
-                $this->apiSecret = null;
-            }
-        } catch (Exception $e) {
-            error_log("Failed to load API credentials: " . $e->getMessage());
-            $this->testnet = true;
-            $this->apiKey = null;
-            $this->apiSecret = null;
-        }
-    }
-    
-    public function hasCredentials() {
-        return !empty($this->apiKey) && !empty($this->apiSecret);
-    }
-    
-    public function getCredentialsStatus() {
-        return [
-            'has_api_key' => !empty($this->apiKey),
-            'has_api_secret' => !empty($this->apiSecret),
-            'testnet_mode' => $this->testnet,
-            'base_url' => $this->baseUrl
+$auth = new Auth();
+$auth->requireAuth();
+
+$db = Database::getInstance();
+$binance = new BinanceAPI();
+$spotAPI = new SpotTradingAPI();
+
+// Initialize enhanced AI safely
+$enhancedAI = null;
+try {
+    // Only initialize if we have a working database connection
+    $testDb = Database::getInstance();
+    $testDb->query("SELECT 1");
+    $enhancedAI = new EnhancedAIAnalyzer();
+} catch (Exception $e) {
+    error_log("Failed to initialize EnhancedAIAnalyzer: " . $e->getMessage());
+    $enhancedAI = null;
+}
+
+// Get enhanced dashboard data
+try {
+    $dashboardData = $db->fetchOne("SELECT * FROM dashboard_summary");
+    if (!$dashboardData) {
+        $dashboardData = [
+            'active_positions' => 0,
+            'today_trades' => 0,
+            'today_pnl' => 0,
+            'today_signals' => 0,
+            'avg_confidence' => 0,
+            'portfolio_value' => 0,
+            'daily_pnl' => 0,
+            'error_count' => 0
         ];
     }
-        
-    public function testConnection() {
-        try {
-            if (!$this->hasCredentials()) {
-                return [
-                    'success' => false, 
-                    'message' => 'API credentials not configured. Please set your Binance API key and secret in Settings.'
-                ];
-            }
-            
-            // Test with a simple ping first (no auth required)
-            try {
-                $response = $this->makeRequest('/fapi/v1/ping');
-            } catch (Exception $e) {
-                return ['success' => false, 'message' => 'Cannot reach Binance API: ' . $e->getMessage()];
-            }
-            
-            // Test authenticated endpoint
-            try {
-                $account = $this->makeRequest('/fapi/v2/account', [], 'GET', true);
-                return ['success' => true, 'message' => 'API connection and authentication successful'];
-            } catch (Exception $e) {
-                return ['success' => false, 'message' => 'API authentication failed: ' . $e->getMessage()];
-            }
-            
-        } catch (Exception $e) {
-            return ['success' => false, 'message' => $e->getMessage()];
-        }
-    }
-    
-    public function getAccountInfo() {
-        if (!$this->hasCredentials()) {
-            throw new Exception('API credentials not configured');
-        }
-        
-        try {
-            $account = $this->makeRequest('/fapi/v2/account', [], 'GET', true);
-            
-            // Normalize the account data structure
-            if (isset($account['assets']) && is_array($account['assets'])) {
-                // Find USDT asset and extract balance
-                $usdtAsset = null;
-                foreach ($account['assets'] as $asset) {
-                    if (isset($asset['asset']) && $asset['asset'] === 'USDT') {
-                        $usdtAsset = $asset;
-                        break;
-                    }
-                }
-                
-                if ($usdtAsset) {
-                    $account['availableBalance'] = (float)($usdtAsset['availableBalance'] ?? $usdtAsset['walletBalance'] ?? 0);
-                    $account['walletBalance'] = (float)($usdtAsset['walletBalance'] ?? 0);
-                } else {
-                    $account['availableBalance'] = 0;
-                    $account['walletBalance'] = 0;
-                }
-            } else {
-                // Handle case where assets is not an array or missing
-                $account['availableBalance'] = (float)($account['availableBalance'] ?? 0);
-                $account['walletBalance'] = (float)($account['totalWalletBalance'] ?? 0);
-                $account['assets'] = [];
-            }
-            
-            // Ensure all numeric fields are properly typed
-            $account['totalWalletBalance'] = (float)($account['totalWalletBalance'] ?? 0);
-            $account['totalUnrealizedProfit'] = (float)($account['totalUnrealizedProfit'] ?? 0);
-            $account['totalMarginBalance'] = (float)($account['totalMarginBalance'] ?? 0);
-            $account['totalPositionInitialMargin'] = (float)($account['totalPositionInitialMargin'] ?? 0);
-            $account['totalOpenOrderInitialMargin'] = (float)($account['totalOpenOrderInitialMargin'] ?? 0);
-            $account['maxWithdrawAmount'] = (float)($account['maxWithdrawAmount'] ?? 0);
-            
-            return $account;
-        } catch (Exception $e) {
-            error_log("Binance API getAccountInfo error: " . $e->getMessage());
-            throw $e;
-        }
-    }
-    
-    public function getPositions() {
-        if (!$this->hasCredentials()) {
-            throw new Exception('API credentials not configured');
-        }
-        
-        try {
-            $positions = $this->makeRequest('/fapi/v2/positionRisk', [], 'GET', true);
-            
-            // Filter and enhance position data
-            $activePositions = [];
-            foreach ($positions as $position) {
-                $positionAmt = (float)$position['positionAmt'];
-                if ($positionAmt != 0) {
-                    // Calculate percentage
-                    $entryPrice = (float)$position['entryPrice'];
-                    $markPrice = (float)$position['markPrice'];
-                    $percentage = 0;
-                    
-                    if ($entryPrice > 0) {
-                        if ($positionAmt > 0) { // Long position
-                            $percentage = (($markPrice - $entryPrice) / $entryPrice) * 100;
-                        } else { // Short position
-                            $percentage = (($entryPrice - $markPrice) / $entryPrice) * 100;
-                        }
-                    }
-                    
-                    $position['percentage'] = $percentage;
-                    $activePositions[] = $position;
-                }
-            }
-            
-            return $activePositions;
-        } catch (Exception $e) {
-            error_log("Binance API getPositions error: " . $e->getMessage());
-            throw $e;
-        }
-    }
-    
-    public function getBalance() {
-        if (!$this->hasCredentials()) {
-            throw new Exception('API credentials not configured');
-        }
-        
-        try {
-            $balance = $this->makeRequest('/fapi/v2/balance', [], 'GET', true);
-            
-            // Find USDT balance
-            $usdtBalance = null;
-            foreach ($balance as $asset) {
-                if ($asset['asset'] === 'USDT') {
-                    $usdtBalance = $asset;
-                    break;
-                }
-            }
-            
-            return $usdtBalance ?: $balance;
-        } catch (Exception $e) {
-            error_log("Binance API getBalance error: " . $e->getMessage());
-            throw $e;
-        }
-    }
-    
-    public function get24hrTicker($symbol = null) {
-        $params = [];
-        if ($symbol) {
-            $params['symbol'] = $symbol;
-        }
-        
-        try {
-            $result = $this->makeRequest('/fapi/v1/ticker/24hr', $params);
-            
-            // Ensure we always return an array
-            if ($result === null || $result === false) {
-                return $this->getMockTickerData($symbol);
-            }
-            
-            // If single symbol requested, ensure it's wrapped in array
-            if ($symbol && !is_array($result)) {
-                return [$result];
-            }
-            
-            // If single symbol but result is not array, wrap it
-            if ($symbol && is_array($result) && !isset($result[0])) {
-                return [$result];
-            }
-            
-            return $result;
-        } catch (Exception $e) {
-            // If API credentials are not configured, return mock data for development
-            if (!$this->hasCredentials()) {
-                return $this->getMockTickerData($symbol);
-            }
-            throw $e;
-        }
-    }
-    
-    private function getMockTickerData($symbol = null) {
-        return [[
-            'symbol' => $symbol ?: 'BTCUSDT',
-            'lastPrice' => '50000.00',
-            'priceChangePercent' => '2.50',
-            'volume' => '1000.00',
-            'highPrice' => '51000.00',
-            'lowPrice' => '49000.00'
-        ]];
-    }
-    
-    public function getKlines($symbol, $interval = '1h', $limit = 100) {
-        $params = [
-            'symbol' => $symbol,
-            'interval' => $interval,
-            'limit' => $limit
+} catch (Exception $e) {
+    error_log("Dashboard summary view error: " . $e->getMessage());
+    $dashboardData = [
+        'active_positions' => 0,
+        'today_trades' => 0,
+        'today_pnl' => 0,
+        'today_signals' => 0,
+        'avg_confidence' => 0,
+        'portfolio_value' => 0,
+        'daily_pnl' => 0,
+        'error_count' => 0
+    ];
+}
+
+try {
+    $portfolioData = $db->fetchOne("SELECT * FROM portfolio_overview");
+    if (!$portfolioData) {
+        $portfolioData = [
+            'total_portfolio_value' => 0,
+            'spot_balance_usdt' => 0,
+            'futures_balance_usdt' => 0,
+            'total_unrealized_pnl' => 0,
+            'daily_pnl' => 0,
+            'daily_pnl_percentage' => 0,
+            'active_positions' => 0,
+            'spot_position_value' => 0,
+            'futures_position_value' => 0,
+            'last_updated' => date('Y-m-d H:i:s')
         ];
-        
-        try {
-            $result = $this->makeRequest('/fapi/v1/klines', $params);
-            
-            // Ensure we return valid data
-            if ($result === null || $result === false || !is_array($result)) {
-                return $this->getMockKlinesData($limit);
-            }
-            
-            return $result;
-        } catch (Exception $e) {
-            // If API credentials are not configured, return mock data for development
-            if (!$this->hasCredentials()) {
-                return $this->getMockKlinesData($limit);
-            }
-            throw $e;
-        }
     }
-    
-    private function getMockKlinesData($limit) {
-        $mockData = [];
-        $basePrice = 50000;
-        for ($i = 0; $i < $limit; $i++) {
-            $price = $basePrice + (rand(-1000, 1000));
-            $mockData[] = [
-                time() - ($i * 3600), // Open time
-                $price, // Open
-                $price + rand(-100, 100), // High
-                $price - rand(-100, 100), // Low
-                $price + rand(-50, 50), // Close
-                rand(100, 1000), // Volume
-                time() - ($i * 3600) + 3599, // Close time
+} catch (Exception $e) {
+    error_log("Portfolio overview view error: " . $e->getMessage());
+    $portfolioData = [
+        'total_portfolio_value' => 0,
+        'spot_balance_usdt' => 0,
+        'futures_balance_usdt' => 0,
+        'total_unrealized_pnl' => 0,
+        'daily_pnl' => 0,
+        'daily_pnl_percentage' => 0,
+        'active_positions' => 0,
+        'spot_position_value' => 0,
+        'futures_position_value' => 0,
+        'last_updated' => date('Y-m-d H:i:s')
+    ];
+}
+
+// Get recent enhanced signals
+$recentSignals = $db->fetchAll("
+    SELECT * FROM ai_signals 
+    ORDER BY created_at DESC 
+    LIMIT 10
+");
+
+// Get performance metrics
+try {
+    $performanceMetrics = $db->fetchAll("
+        SELECT * FROM performance_metrics 
+        WHERE date >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
+        ORDER BY date DESC
+    ");
+} catch (Exception $e) {
+    error_log("Performance metrics error: " . $e->getMessage());
+    $performanceMetrics = [];
+}
+
+// Get active positions with enhanced data
+$activePositions = $db->fetchAll("
+    SELECT * FROM positions 
+    WHERE position_amt != 0 
+    ORDER BY unrealized_pnl DESC
+");
+
+// Get recent trades with enhanced data
+$recentTrades = $db->fetchAll("
+    SELECT * FROM trading_history 
+    ORDER BY created_at DESC 
+    LIMIT 10
+");
+
+// Get spot balances
+try {
+    $spotBalances = $db->fetchAll("
+        SELECT * FROM spot_balances 
+        WHERE total > 0 
+        ORDER BY usdt_value DESC
+    ");
+} catch (Exception $e) {
+    error_log("Spot balances error: " . $e->getMessage());
+    $spotBalances = [];
+}
+
+// Get notifications
+try {
+    $notifications = $db->fetchAll("
+        SELECT * FROM notifications 
+        WHERE read_at IS NULL 
+        ORDER BY created_at DESC
+        LIMIT 5
+    ");
+} catch (Exception $e) {
+    error_log("Notifications error: " . $e->getMessage());
+    $notifications = [];
+}
+
+// Get market data for charts
+$chartData = [];
+$priceData = [];
+try {
+    $activePairs = $db->fetchAll("SELECT symbol FROM trading_pairs WHERE enabled = 1 LIMIT 8");
+    foreach ($activePairs as $pair) {
+        try {
+            // Get both spot and futures data
+            $futuresKlines = $binance->getKlines($pair['symbol'], '1h', 24);
+            
+            $spotKlines = [];
+            try {
+                $spotKlines = $spotAPI->getSpotKlines($pair['symbol'], '1h', 24);
+            } catch (Exception $e) {
+                error_log("Error getting spot klines for {$pair['symbol']}: " . $e->getMessage());
+            }
+            
+            if (!empty($futuresKlines)) {
+                $chartData[$pair['symbol']]['futures'] = array_map(function($kline) {
+                    return [
+                        'time' => $kline[0],
+                        'open' => (float)$kline[1],
+                        'high' => (float)$kline[2],
+                        'low' => (float)$kline[3],
+                        'close' => (float)$kline[4],
+                        'volume' => (float)$kline[5]
+                    ];
+                }, $futuresKlines);
+            }
+            
+            if (!empty($spotKlines)) {
+                $chartData[$pair['symbol']]['spot'] = array_map(function($kline) {
+                    return [
+                        'time' => $kline[0],
+                        'open' => (float)$kline[1],
+                        'high' => (float)$kline[2],
+                        'low' => (float)$kline[3],
+                        'close' => (float)$kline[4],
+                        'volume' => (float)$kline[5]
+                    ];
+                }, $spotKlines);
+            }
+        } catch (Exception $e) {
+            error_log("Error getting chart data for {$pair['symbol']}: " . $e->getMessage());
+        }
+        
+        // Get current prices
+        try {
+            $futuresTicker = $binance->get24hrTicker($pair['symbol']);
+            
+            $spotTicker = [];
+            try {
+                $spotTicker = $spotAPI->getSpotTicker($pair['symbol']);
+            } catch (Exception $e) {
+                error_log("Error getting spot ticker for {$pair['symbol']}: " . $e->getMessage());
+            }
+            
+            $priceData[$pair['symbol']] = [
+                'futures' => [
+                    'price' => (float)($futuresTicker[0]['lastPrice'] ?? 0),
+                    'change' => (float)($futuresTicker[0]['priceChangePercent'] ?? 0),
+                    'volume' => (float)($futuresTicker[0]['volume'] ?? 0)
+                ],
+                'spot' => [
+                    'price' => (float)($spotTicker[0]['lastPrice'] ?? 0),
+                    'change' => (float)($spotTicker[0]['priceChangePercent'] ?? 0),
+                    'volume' => (float)($spotTicker[0]['volume'] ?? 0)
+                ]
             ];
-        }
-        return array_reverse($mockData);
-    }
-    
-    public function placeOrder($symbol, $side, $type, $quantity, $price = null, $timeInForce = 'GTC') {
-        if (!$this->hasCredentials()) {
-            throw new Exception('API credentials not configured');
-        }
-        
-        $params = [
-            'symbol' => $symbol,
-            'side' => $side,
-            'type' => $type,
-            'quantity' => $quantity
-        ];
-        
-        if ($price && in_array($type, ['LIMIT', 'STOP', 'TAKE_PROFIT'])) {
-            $params['price'] = $price;
-            $params['timeInForce'] = $timeInForce;
-        }
-        
-        return $this->makeRequest('/fapi/v1/order', $params, 'POST', true);
-    }
-    
-    public function placeStopOrder($symbol, $side, $type, $quantity, $stopPrice, $price = null) {
-        if (!$this->hasCredentials()) {
-            throw new Exception('API credentials not configured');
-        }
-        
-        $params = [
-            'symbol' => $symbol,
-            'side' => $side,
-            'type' => $type,
-            'quantity' => $quantity,
-            'stopPrice' => $stopPrice
-        ];
-        
-        // For STOP_MARKET orders, we only need stopPrice
-        // For STOP orders, we need both stopPrice and price
-        if ($price && $type === 'STOP') {
-            $params['price'] = $price;
-            $params['timeInForce'] = 'GTC';
-        }
-        
-        return $this->makeRequest('/fapi/v1/order', $params, 'POST', true);
-    }
-    
-    public function cancelOrder($symbol, $orderId) {
-        if (!$this->hasCredentials()) {
-            throw new Exception('API credentials not configured');
-        }
-        
-        $params = [
-            'symbol' => $symbol,
-            'orderId' => $orderId
-        ];
-        return $this->makeRequest('/fapi/v1/order', $params, 'DELETE', true);
-    }
-    
-    public function getOpenOrders($symbol = null) {
-        if (!$this->hasCredentials()) {
-            throw new Exception('API credentials not configured');
-        }
-        
-        $params = [];
-        if ($symbol) {
-            $params['symbol'] = $symbol;
-        }
-        return $this->makeRequest('/fapi/v1/openOrders', $params, 'GET', true);
-    }
-    
-    public function getOrderHistory($symbol, $limit = 100) {
-        if (!$this->hasCredentials()) {
-            throw new Exception('API credentials not configured');
-        }
-        
-        $params = [
-            'symbol' => $symbol,
-            'limit' => $limit
-        ];
-        return $this->makeRequest('/fapi/v1/allOrders', $params, 'GET', true);
-    }
-    
-    public function makeRequest($endpoint, $params = [], $method = 'GET', $signed = false) {
-        return $this->makeRequestPublic($endpoint, $params, $method, $signed);
-    }
-    
-    public function changeMarginType($symbol, $marginType) {
-        if (!$this->hasCredentials()) {
-            throw new Exception('API credentials not configured');
-        }
-        
-        $params = [
-            'symbol' => $symbol,
-            'marginType' => $marginType
-        ];
-        return $this->makeRequest('/fapi/v1/marginType', $params, 'POST', true);
-    }
-    
-    public function changeLeverage($symbol, $leverage) {
-        if (!$this->hasCredentials()) {
-            throw new Exception('API credentials not configured');
-        }
-        
-        $params = [
-            'symbol' => $symbol,
-            'leverage' => $leverage
-        ];
-        return $this->makeRequest('/fapi/v1/leverage', $params, 'POST', true);
-    }
-    
-    private function makeRequestPublic($endpoint, $params = [], $method = 'GET', $signed = false) {
-        if ($signed && (!$this->apiKey || !$this->apiSecret)) {
-            throw new Exception('API credentials not configured. Please set your Binance API key and secret in the admin Settings page.');
-        }
-        
-        $url = $this->baseUrl . $endpoint;
-        $headers = [
-            'Content-Type: application/x-www-form-urlencoded'
-        ];
-        
-        if ($this->apiKey) {
-            $headers[] = 'X-MBX-APIKEY: ' . $this->apiKey;
-        }
-        
-        if ($signed) {
-            $params['timestamp'] = (string)round(microtime(true) * 1000);
-            $params['recvWindow'] = 5000;
-        }
-        
-        $queryString = http_build_query($params);
-        
-        if ($signed && $this->apiSecret) {
-            $signature = hash_hmac('sha256', $queryString, $this->apiSecret);
-            $queryString .= '&signature=' . $signature;
-        }
-        
-        $ch = curl_init();
-        
-        curl_setopt_array($ch, [
-            CURLOPT_URL => $method === 'GET' ? $url . '?' . $queryString : $url,
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_HTTPHEADER => $headers,
-            CURLOPT_TIMEOUT => 10,
-            CURLOPT_CONNECTTIMEOUT => 3,
-            CURLOPT_SSL_VERIFYPEER => true,
-            CURLOPT_USERAGENT => 'Binance AI Trader/2.0',
-            CURLOPT_FOLLOWLOCATION => false,
-            CURLOPT_MAXREDIRS => 0
-        ]);
-        
-        if ($method === 'POST') {
-            curl_setopt($ch, CURLOPT_POST, true);
-            curl_setopt($ch, CURLOPT_POSTFIELDS, $queryString);
-        } elseif ($method === 'DELETE') {
-            curl_setopt($ch, CURLOPT_CUSTOMREQUEST, 'DELETE');
-            curl_setopt($ch, CURLOPT_POSTFIELDS, $queryString);
-        }
-        
-        $response = curl_exec($ch);
-        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        $error = curl_error($ch);
-        $totalTime = curl_getinfo($ch, CURLINFO_TOTAL_TIME);
-        curl_close($ch);
-        
-        if ($error) {
-            // Log timeout errors differently
-            if (strpos($error, 'timeout') !== false || strpos($error, 'timed out') !== false) {
-                error_log("API timeout for {$endpoint}: {$error} (took {$totalTime}s)");
-                throw new Exception('API request timeout - please try again');
-            }
-            throw new Exception('Network Error: ' . $error);
-        }
-        
-        // Log slow requests
-        if ($totalTime > 10) {
-            error_log("Slow API request for {$endpoint}: {$totalTime}s");
-        }
-        
-        $data = json_decode($response, true);
-        
-        if ($httpCode !== 200) {
-            $errorMsg = isset($data['msg']) ? $data['msg'] : 'Unknown API error';
-            
-            // Provide more specific error messages
-            if ($httpCode === 401) {
-                $errorMsg = "Invalid API credentials. Please check your API key and secret in Settings. Error: " . $errorMsg;
-            } elseif ($httpCode === 403) {
-                $errorMsg = "API key doesn't have required permissions. Please enable Futures trading permissions. Error: " . $errorMsg;
-            } elseif ($httpCode === 400 && strpos($errorMsg, 'Precision') !== false) {
-                $errorMsg = "Invalid quantity precision for this symbol. " . $errorMsg;
-            }
-            
-            throw new Exception("Binance API Error ({$httpCode}): {$errorMsg}");
-        }
-        
-        // Log API usage for rate limiting
-        $this->logAPIUsage($endpoint);
-        
-        return $data;
-    }
-    
-    private function logAPIUsage($endpoint) {
-        try {
-            // Check if table exists first
-            $tableExists = $this->db->fetchOne("SHOW TABLES LIKE 'api_rate_limits'");
-            if ($tableExists) {
-                $this->db->query(
-                    "INSERT INTO api_rate_limits (endpoint, requests_count, window_start) 
-                     VALUES (?, 1, NOW()) 
-                     ON DUPLICATE KEY UPDATE 
-                     requests_count = requests_count + 1, 
-                     last_request = NOW()",
-                    [$endpoint]
-                );
-            }
         } catch (Exception $e) {
-            error_log("Failed to log API usage: " . $e->getMessage());
+            error_log("Error getting price data for {$pair['symbol']}: " . $e->getMessage());
         }
     }
-    
-    private function encrypt($data) {
-        if (empty($data)) return null;
-        
-        if (!defined('ENCRYPTION_KEY')) {
-            throw new Exception('Encryption key not configured');
-        }
-        
-        $key = ENCRYPTION_KEY;
-        $iv = random_bytes(16);
-        $encrypted = openssl_encrypt($data, 'AES-256-CBC', $key, 0, $iv);
-        
-        return base64_encode($iv . $encrypted);
-    }
-    
-    private function decrypt($data) {
-        if (empty($data)) return null;
-        
-        if (!defined('ENCRYPTION_KEY')) {
-            throw new Exception('Encryption key not configured');
-        }
-        
-        $key = ENCRYPTION_KEY;
-        $data = base64_decode($data);
-        
-        if (strlen($data) < 16) {
-            // Return null for invalid data instead of throwing exception
-            error_log('Invalid encrypted data format');
-            return null;
-        }
-        
-        $iv = substr($data, 0, 16);
-        $encrypted = substr($data, 16);
-        
-        $decrypted = openssl_decrypt($encrypted, 'AES-256-CBC', $key, 0, $iv);
-        
-        if ($decrypted === false) {
-            error_log('Failed to decrypt API secret');
-            return null;
-        }
-        
-        return $decrypted;
-    }
-    
-    public function updateCredentials($apiKey, $apiSecret) {
-        $encryptedSecret = $this->encrypt($apiSecret);
-        
-        $this->db->update(
-            'trading_settings',
-            [
-                'binance_api_key' => $apiKey,
-                'binance_api_secret' => $encryptedSecret
-            ],
-            'id = ?',
-            [1]
-        );
-        
-        $this->apiKey = $apiKey;
-        $this->apiSecret = $apiSecret;
-        
-        return true;
+} catch (Exception $e) {
+    error_log("Chart data error: " . $e->getMessage());
+}
+
+// Get settings
+if (!isset($settings) || !$settings) {
+    $settings = $db->fetchOne("SELECT * FROM trading_settings WHERE id = 1");
+    if (!$settings) {
+        // Create default settings if none exist
+        $db->insert('trading_settings', [
+            'id' => 1,
+            'testnet_mode' => 1,
+            'trading_enabled' => 0,
+            'ai_enabled' => 1,
+            'spot_trading_enabled' => 1,
+            'futures_trading_enabled' => 1
+        ]);
+        $settings = $db->fetchOne("SELECT * FROM trading_settings WHERE id = 1");
     }
 }
+$user = $auth->getCurrentUser();
+?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Enhanced Dashboard - <?php echo APP_NAME; ?></title>
+    <link href="../assets/css/admin.css" rel="stylesheet">
+    <link href="../assets/css/enhanced-dashboard.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+</head>
+<body>
+    <?php include 'includes/header.php'; ?>
+    <?php include 'includes/sidebar.php'; ?>
+    
+    <main class="main-content">
+        <div class="page-header">
+            <h1>Enhanced Trading Dashboard</h1>
+            <div class="status-indicators">
+                <div class="status-item">
+                    <span class="status-dot <?php echo $settings['trading_enabled'] ? 'active' : 'inactive'; ?>"></span>
+                    Trading: <?php echo $settings['trading_enabled'] ? 'Active' : 'Paused'; ?>
+                </div>
+                <div class="status-item">
+                    <span class="status-dot <?php echo $settings['ai_enabled'] ? 'active' : 'inactive'; ?>"></span>
+                    AI: <?php echo $settings['ai_enabled'] ? 'Enabled' : 'Disabled'; ?>
+                </div>
+                <div class="status-item">
+                    <span class="status-dot <?php echo $settings['spot_trading_enabled'] ? 'active' : 'inactive'; ?>"></span>
+                    Spot: <?php echo $settings['spot_trading_enabled'] ? 'Enabled' : 'Disabled'; ?>
+                </div>
+                <div class="status-item">
+                    <span class="status-dot <?php echo $settings['futures_trading_enabled'] ? 'active' : 'inactive'; ?>"></span>
+                    Futures: <?php echo $settings['futures_trading_enabled'] ? 'Enabled' : 'Disabled'; ?>
+                </div>
+                <div class="status-item">
+                    <span class="status-dot <?php echo $settings['testnet_mode'] ? 'warning' : 'active'; ?>"></span>
+                    Mode: <?php echo $settings['testnet_mode'] ? 'Testnet' : 'Live'; ?>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Enhanced Stats Grid -->
+        <div class="enhanced-stats-grid">
+            <div class="stat-card portfolio-value">
+                <div class="stat-icon">💰</div>
+                <div class="stat-content">
+                    <h3>Total Portfolio Value</h3>
+                    <div class="stat-value">$<?php echo number_format($portfolioData['total_portfolio_value'] ?? 0, 2); ?></div>
+                    <div class="stat-change <?php echo ($portfolioData['daily_pnl'] ?? 0) >= 0 ? 'positive' : 'negative'; ?>">
+                        <?php echo ($portfolioData['daily_pnl'] ?? 0) >= 0 ? '+' : ''; ?>$<?php echo number_format($portfolioData['daily_pnl'] ?? 0, 2); ?> 
+                        (<?php echo number_format($portfolioData['daily_pnl_percentage'] ?? 0, 2); ?>%)
+                    </div>
+                </div>
+            </div>
+            
+            <div class="stat-card spot-balance">
+                <div class="stat-icon">🏪</div>
+                <div class="stat-content">
+                    <h3>Spot Balance</h3>
+                    <div class="stat-value">$<?php echo number_format($portfolioData['spot_balance_usdt'] ?? 0, 2); ?></div>
+                    <div class="stat-subtitle">Available for spot trading</div>
+                </div>
+            </div>
+            
+            <div class="stat-card futures-balance">
+                <div class="stat-icon">⚡</div>
+                <div class="stat-content">
+                    <h3>Futures Balance</h3>
+                    <div class="stat-value">$<?php echo number_format($portfolioData['futures_balance_usdt'] ?? 0, 2); ?></div>
+                    <div class="stat-subtitle">Available for futures trading</div>
+                </div>
+            </div>
+            
+            <div class="stat-card unrealized-pnl">
+                <div class="stat-icon">📊</div>
+                <div class="stat-content">
+                    <h3>Unrealized P&L</h3>
+                    <div class="stat-value <?php echo ($portfolioData['total_unrealized_pnl'] ?? 0) >= 0 ? 'positive' : 'negative'; ?>">
+                        <?php echo ($portfolioData['total_unrealized_pnl'] ?? 0) >= 0 ? '+' : ''; ?>$<?php echo number_format($portfolioData['total_unrealized_pnl'] ?? 0, 2); ?>
+                    </div>
+                    <div class="stat-subtitle"><?php echo $portfolioData['active_positions'] ?? 0; ?> active positions</div>
+                </div>
+            </div>
+            
+            <div class="stat-card today-trades">
+                <div class="stat-icon">🔄</div>
+                <div class="stat-content">
+                    <h3>Today's Trades</h3>
+                    <div class="stat-value"><?php echo $dashboardData['today_trades'] ?? 0; ?></div>
+                    <div class="stat-subtitle <?php echo ($dashboardData['today_pnl'] ?? 0) >= 0 ? 'positive' : 'negative'; ?>">
+                        P&L: <?php echo ($dashboardData['today_pnl'] ?? 0) >= 0 ? '+' : ''; ?>$<?php echo number_format($dashboardData['today_pnl'] ?? 0, 2); ?>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="stat-card ai-signals">
+                <div class="stat-icon">🤖</div>
+                <div class="stat-content">
+                    <h3>AI Signals (24h)</h3>
+                    <div class="stat-value"><?php echo $dashboardData['today_signals'] ?? 0; ?></div>
+                    <div class="stat-subtitle">Avg Confidence: <?php echo number_format(($dashboardData['avg_confidence'] ?? 0) * 100, 1); ?>%</div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Notifications Bar -->
+        <?php if (!empty($notifications)): ?>
+        <div class="notifications-bar">
+            <div class="notifications-header">
+                <h3>🔔 Recent Notifications</h3>
+                <button onclick="markAllAsRead()" class="btn btn-sm">Mark All Read</button>
+            </div>
+            <div class="notifications-list">
+                <?php foreach ($notifications as $notification): ?>
+                    <div class="notification-item priority-<?php echo strtolower($notification['priority']); ?>">
+                        <div class="notification-content">
+                            <strong><?php echo htmlspecialchars($notification['title']); ?></strong>
+                            <p><?php echo htmlspecialchars($notification['message']); ?></p>
+                        </div>
+                        <div class="notification-time">
+                            <?php echo date('H:i', strtotime($notification['created_at'])); ?>
+                        </div>
+                    </div>
+                <?php endforeach; ?>
+            </div>
+        </div>
+        <?php endif; ?>
+        
+        <!-- Enhanced Charts Section -->
+        <div class="enhanced-charts-section">
+            <div class="charts-grid">
+                <!-- Portfolio Performance Chart -->
+                <div class="chart-card full-width">
+                    <div class="card-header">
+                        <h3>📈 Portfolio Performance (30 Days)</h3>
+                        <div class="chart-controls">
+                            <button onclick="toggleChartType('portfolio')" class="btn btn-sm">Toggle View</button>
+                            <button onclick="refreshPortfolioChart()" class="btn btn-sm">Refresh</button>
+                        </div>
+                    </div>
+                    <div class="card-content">
+                        <canvas id="portfolioChart" width="800" height="300"></canvas>
+                    </div>
+                </div>
+                
+                <!-- Market Overview -->
+                <div class="chart-card">
+                    <div class="card-header">
+                        <h3>💹 Market Overview</h3>
+                        <button onclick="refreshMarketData()" class="btn btn-sm">Refresh</button>
+                    </div>
+                    <div class="card-content">
+                        <div id="marketOverview" class="market-overview-grid">
+                            <?php foreach ($priceData as $symbol => $data): ?>
+                                <div class="market-item" data-symbol="<?php echo $symbol; ?>">
+                                    <div class="market-symbol"><?php echo $symbol; ?></div>
+                                    <div class="market-prices">
+                                        <div class="price-row">
+                                            <span class="price-label">Futures:</span>
+                                            <span class="price-value">$<?php echo number_format($data['futures']['price'], 4); ?></span>
+                                            <span class="price-change <?php echo $data['futures']['change'] >= 0 ? 'positive' : 'negative'; ?>">
+                                                <?php echo $data['futures']['change'] >= 0 ? '+' : ''; ?><?php echo number_format($data['futures']['change'], 2); ?>%
+                                            </span>
+                                        </div>
+                                        <div class="price-row">
+                                            <span class="price-label">Spot:</span>
+                                            <span class="price-value">$<?php echo number_format($data['spot']['price'], 4); ?></span>
+                                            <span class="price-change <?php echo $data['spot']['change'] >= 0 ? 'positive' : 'negative'; ?>">
+                                                <?php echo $data['spot']['change'] >= 0 ? '+' : ''; ?><?php echo number_format($data['spot']['change'], 2); ?>%
+                                            </span>
+                                        </div>
+                                    </div>
+                                </div>
+                            <?php endforeach; ?>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- AI Signals Performance -->
+                <div class="chart-card">
+                    <div class="card-header">
+                        <h3>🎯 AI Signals Performance</h3>
+                        <button onclick="refreshSignalsChart()" class="btn btn-sm">Refresh</button>
+                    </div>
+                    <div class="card-content">
+                        <canvas id="signalsChart" width="400" height="300"></canvas>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Enhanced Dashboard Grid -->
+        <div class="enhanced-dashboard-grid">
+            <!-- Active Positions -->
+            <div class="dashboard-card positions-card">
+                <div class="card-header">
+                    <h3>📈 Active Positions</h3>
+                    <a href="positions.php" class="btn btn-sm">Manage All</a>
+                </div>
+                <div class="card-content">
+                    <?php if (empty($activePositions)): ?>
+                        <div class="empty-state">
+                            <div class="empty-icon">📈</div>
+                            <p>No active positions</p>
+                        </div>
+                    <?php else: ?>
+                        <div class="positions-table">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>Symbol</th>
+                                        <th>Type</th>
+                                        <th>Side</th>
+                                        <th>Size</th>
+                                        <th>Entry</th>
+                                        <th>Current</th>
+                                        <th>P&L</th>
+                                        <th>%</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <?php foreach ($activePositions as $position): ?>
+                                        <tr>
+                                            <td><strong><?php echo $position['symbol']; ?></strong></td>
+                                            <td>
+                                                <span class="trading-type <?php echo strtolower($position['trading_type']); ?>">
+                                                    <?php echo $position['trading_type']; ?>
+                                                </span>
+                                            </td>
+                                            <td>
+                                                <span class="position-side <?php echo strtolower($position['side']); ?>">
+                                                    <?php echo $position['side']; ?>
+                                                </span>
+                                            </td>
+                                            <td><?php echo abs($position['position_amt']); ?></td>
+                                            <td>$<?php echo number_format($position['entry_price'], 2); ?></td>
+                                            <td>$<?php echo number_format($position['mark_price'], 2); ?></td>
+                                            <td class="<?php echo $position['unrealized_pnl'] >= 0 ? 'positive' : 'negative'; ?>">
+                                                <?php echo $position['unrealized_pnl'] >= 0 ? '+' : ''; ?>$<?php echo number_format($position['unrealized_pnl'], 2); ?>
+                                            </td>
+                                            <td class="<?php echo $position['percentage'] >= 0 ? 'positive' : 'negative'; ?>">
+                                                <?php echo $position['percentage'] >= 0 ? '+' : ''; ?><?php echo number_format($position['percentage'], 2); ?>%
+                                            </td>
+                                        </tr>
+                                    <?php endforeach; ?>
+                                </tbody>
+                            </table>
+                        </div>
+                    <?php endif; ?>
+                </div>
+            </div>
+            
+            <!-- Recent Enhanced AI Signals -->
+            <div class="dashboard-card signals-card">
+                <div class="card-header">
+                    <h3>🤖 Recent AI Signals</h3>
+                    <a href="signals.php" class="btn btn-sm">View All</a>
+                </div>
+                <div class="card-content">
+                    <?php if (empty($recentSignals)): ?>
+                        <div class="empty-state">
+                            <div class="empty-icon">🤖</div>
+                            <p>No AI signals yet</p>
+                        </div>
+                    <?php else: ?>
+                        <div class="signals-list">
+                            <?php foreach ($recentSignals as $signal): ?>
+                                <div class="signal-item">
+                                    <div class="signal-info">
+                                        <span class="signal-symbol"><?php echo $signal['symbol']; ?></span>
+                                        <span class="signal-type <?php echo strtolower($signal['signal']); ?>">
+                                            <?php echo $signal['signal']; ?>
+                                        </span>
+                                        <span class="signal-strength <?php echo strtolower($signal['strength']); ?>">
+                                            <?php echo $signal['strength']; ?>
+                                        </span>
+                                        <span class="trading-type <?php echo strtolower($signal['trading_type']); ?>">
+                                            <?php echo $signal['trading_type']; ?>
+                                        </span>
+                                    </div>
+                                    <div class="signal-meta">
+                                        <div class="confidence-display">
+                                            <div class="confidence-bar">
+                                                <div class="confidence-fill" style="width: <?php echo ($signal['confidence'] * 100); ?>%"></div>
+                                            </div>
+                                            <span class="confidence-text"><?php echo number_format($signal['confidence'] * 100, 1); ?>%</span>
+                                        </div>
+                                        <span class="signal-time"><?php echo date('H:i', strtotime($signal['created_at'])); ?></span>
+                                        <?php if ($signal['executed']): ?>
+                                            <span class="executed-badge">✓</span>
+                                        <?php endif; ?>
+                                    </div>
+                                </div>
+                            <?php endforeach; ?>
+                        </div>
+                    <?php endif; ?>
+                </div>
+            </div>
+            
+            <!-- Spot Balances -->
+            <div class="dashboard-card balances-card">
+                <div class="card-header">
+                    <h3>🏪 Spot Balances</h3>
+                    <button onclick="refreshSpotBalances()" class="btn btn-sm">Refresh</button>
+                </div>
+                <div class="card-content">
+                    <?php if (empty($spotBalances)): ?>
+                        <div class="empty-state">
+                            <div class="empty-icon">🏪</div>
+                            <p>No spot balances</p>
+                        </div>
+                    <?php else: ?>
+                        <div class="balances-list">
+                            <?php foreach ($spotBalances as $balance): ?>
+                                <div class="balance-item">
+                                    <div class="balance-info">
+                                        <span class="balance-asset"><?php echo $balance['asset']; ?></span>
+                                        <span class="balance-amount"><?php echo number_format($balance['total'], 6); ?></span>
+                                    </div>
+                                    <div class="balance-value">
+                                        $<?php echo number_format($balance['usdt_value'], 2); ?>
+                                    </div>
+                                </div>
+                            <?php endforeach; ?>
+                        </div>
+                    <?php endif; ?>
+                </div>
+            </div>
+            
+            <!-- Recent Trades -->
+            <div class="dashboard-card trades-card">
+                <div class="card-header">
+                    <h3>📋 Recent Trades</h3>
+                    <a href="trades.php" class="btn btn-sm">View All</a>
+                </div>
+                <div class="card-content">
+                    <?php if (empty($recentTrades)): ?>
+                        <div class="empty-state">
+                            <div class="empty-icon">📊</div>
+                            <p>No trades yet</p>
+                        </div>
+                    <?php else: ?>
+                        <div class="trades-list">
+                            <?php foreach ($recentTrades as $trade): ?>
+                                <div class="trade-item">
+                                    <div class="trade-info">
+                                        <span class="trade-symbol"><?php echo $trade['symbol']; ?></span>
+                                        <span class="trading-type <?php echo strtolower($trade['trading_type']); ?>">
+                                            <?php echo $trade['trading_type']; ?>
+                                        </span>
+                                        <span class="trade-side <?php echo strtolower($trade['side']); ?>">
+                                            <?php echo $trade['side']; ?>
+                                        </span>
+                                        <span class="trade-quantity"><?php echo $trade['quantity']; ?></span>
+                                    </div>
+                                    <div class="trade-meta">
+                                        <span class="trade-pnl <?php echo ($trade['profit_loss'] ?? 0) >= 0 ? 'positive' : 'negative'; ?>">
+                                            <?php echo ($trade['profit_loss'] ?? 0) >= 0 ? '+' : ''; ?>$<?php echo number_format($trade['profit_loss'] ?? 0, 2); ?>
+                                        </span>
+                                        <span class="trade-time"><?php echo date('M j, H:i', strtotime($trade['created_at'])); ?></span>
+                                        <?php if ($trade['strategy_used']): ?>
+                                            <span class="strategy-badge"><?php echo $trade['strategy_used']; ?></span>
+                                        <?php endif; ?>
+                                    </div>
+                                </div>
+                            <?php endforeach; ?>
+                        </div>
+                    <?php endif; ?>
+                </div>
+            </div>
+        </div>
+    </main>
+    
+    <script src="../assets/js/admin.js"></script>
+    <script src="../assets/js/enhanced-dashboard.js"></script>
+    <script>
+        // Chart data from PHP
+        const performanceData = <?php echo json_encode($performanceMetrics); ?>;
+        const portfolioData = <?php echo json_encode($portfolioData); ?>;
+        const priceData = <?php echo json_encode($priceData); ?>;
+        const chartData = <?php echo json_encode($chartData); ?>;
+        
+        // Initialize enhanced dashboard
+        document.addEventListener('DOMContentLoaded', function() {
+            initializeEnhancedCharts();
+            startEnhancedLiveUpdates();
+        });
+        
+        function initializeEnhancedCharts() {
+            // Portfolio Performance Chart
+            const portfolioCtx = document.getElementById('portfolioChart').getContext('2d');
+            new Chart(portfolioCtx, {
+                type: 'line',
+                data: {
+                    labels: performanceData.map(item => item.date),
+                    datasets: [{
+                        label: 'Portfolio Value',
+                        data: performanceData.map(item => parseFloat(item.ending_balance)),
+                        borderColor: '#3b82f6',
+                        backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                        tension: 0.4,
+                        fill: true
+                    }, {
+                        label: 'Daily P&L',
+                        data: performanceData.map(item => parseFloat(item.total_pnl)),
+                        borderColor: '#10b981',
+                        backgroundColor: 'rgba(16, 185, 129, 0.1)',
+                        tension: 0.4,
+                        fill: false
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: {
+                            beginAtZero: false,
+                            ticks: {
+                                callback: function(value) {
+                                    return '$' + value.toFixed(2);
+                                }
+                            }
+                        }
+                    },
+                    plugins: {
+                        legend: {
+                            display: true,
+                            position: 'top'
+                        }
+                    }
+                }
+            });
+            
+            // AI Signals Performance Chart
+            const signalsCtx = document.getElementById('signalsChart').getContext('2d');
+            new Chart(signalsCtx, {
+                type: 'doughnut',
+                data: {
+                    labels: ['Executed', 'Pending', 'Successful'],
+                    datasets: [{
+                        data: [
+                            performanceData.reduce((sum, item) => sum + parseInt(item.ai_signals_executed), 0),
+                            performanceData.reduce((sum, item) => sum + parseInt(item.ai_signals_generated) - parseInt(item.ai_signals_executed), 0),
+                            performanceData.reduce((sum, item) => sum + parseInt(item.winning_trades), 0)
+                        ],
+                        backgroundColor: ['#3b82f6', '#f59e0b', '#10b981'],
+                        borderWidth: 2
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            position: 'bottom'
+                        }
+                    }
+                }
+            });
+        }
+        
+        function startEnhancedLiveUpdates() {
+            // Update market data every 10 seconds
+            setInterval(refreshMarketData, 10000);
+            
+            // Update portfolio data every 30 seconds
+            setInterval(refreshPortfolioData, 30000);
+            
+            // Update notifications every 60 seconds
+            setInterval(refreshNotifications, 60000);
+        }
+        
+        function refreshMarketData() {
+            fetch('../api/enhanced-market-data.php')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        updateMarketDisplay(data.prices);
+                    }
+                })
+                .catch(error => console.error('Error fetching market data:', error));
+        }
+        
+        function refreshPortfolioData() {
+            fetch('../api/portfolio-data.php')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        updatePortfolioDisplay(data.portfolio);
+                    }
+                })
+                .catch(error => console.error('Error fetching portfolio data:', error));
+        }
+        
+        function refreshSpotBalances() {
+            fetch('../api/spot-balances.php')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        updateSpotBalancesDisplay(data.balances);
+                    }
+                })
+                .catch(error => console.error('Error fetching spot balances:', error));
+        }
+        
+        function refreshNotifications() {
+            fetch('../api/notifications.php')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        updateNotificationsDisplay(data.notifications);
+                    }
+                })
+                .catch(error => console.error('Error fetching notifications:', error));
+        }
+        
+        function markAllAsRead() {
+            fetch('../api/notifications.php', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ action: 'mark_all_read' })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    document.querySelector('.notifications-bar').style.display = 'none';
+                }
+            })
+            .catch(error => console.error('Error marking notifications as read:', error));
+        }
+        
+        function updateMarketDisplay(prices) {
+            Object.keys(prices).forEach(symbol => {
+                const marketItem = document.querySelector(`[data-symbol="${symbol}"]`);
+                if (marketItem) {
+                    // Update futures price
+                    const futuresPrice = marketItem.querySelector('.price-row:first-child .price-value');
+                    const futuresChange = marketItem.querySelector('.price-row:first-child .price-change');
+                    
+                    if (futuresPrice) {
+                        futuresPrice.textContent = '$' + parseFloat(prices[symbol].futures.price).toFixed(4);
+                    }
+                    
+                    if (futuresChange) {
+                        const change = parseFloat(prices[symbol].futures.change);
+                        futuresChange.textContent = (change >= 0 ? '+' : '') + change.toFixed(2) + '%';
+                        futuresChange.className = 'price-change ' + (change >= 0 ? 'positive' : 'negative');
+                    }
+                    
+                    // Update spot price
+                    const spotPrice = marketItem.querySelector('.price-row:last-child .price-value');
+                    const spotChange = marketItem.querySelector('.price-row:last-child .price-change');
+                    
+                    if (spotPrice) {
+                        spotPrice.textContent = '$' + parseFloat(prices[symbol].spot.price).toFixed(4);
+                    }
+                    
+                    if (spotChange) {
+                        const change = parseFloat(prices[symbol].spot.change);
+                        spotChange.textContent = (change >= 0 ? '+' : '') + change.toFixed(2) + '%';
+                        spotChange.className = 'price-change ' + (change >= 0 ? 'positive' : 'negative');
+                    }
+                }
+            });
+        }
+        
+        // Auto-refresh dashboard every 60 seconds
+        setInterval(function() {
+            location.reload();
+        }, 60000);
+    </script>
+</body>
+</html>

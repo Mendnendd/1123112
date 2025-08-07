@@ -435,6 +435,12 @@ class TradingBot {
             
             $positions = $this->binance->getPositions();
             
+            // Validate positions data
+            if (!is_array($positions)) {
+                $this->log('ERROR', 'Invalid positions data received from API');
+                return;
+            }
+            
             // Check if positions table exists and clear existing positions
             try {
                 $this->db->query("DELETE FROM positions");
@@ -444,7 +450,7 @@ class TradingBot {
             }
             
             foreach ($positions as $position) {
-                if ((float)$position['positionAmt'] != 0) {
+                if ((float)($position['positionAmt'] ?? 0) != 0) {
                     // Calculate percentage if not provided
                     $percentage = 0;
                     if (isset($position['percentage'])) {
@@ -480,11 +486,18 @@ class TradingBot {
                         'position_value' => abs((float)$position['positionAmt']) * (float)$position['markPrice']
                     ];
                     
-                    $this->db->insert('positions', $positionData);
+                    try {
+                        $this->db->insert('positions', $positionData);
+                    } catch (Exception $e) {
+                        $this->log('ERROR', "Failed to insert position for {$position['symbol']}: " . $e->getMessage());
+                    }
                 }
             }
             
-            $this->log('INFO', 'Positions updated successfully. Active positions: ' . count($positions));
+            $activeCount = count(array_filter($positions, function($pos) {
+                return (float)($pos['positionAmt'] ?? 0) != 0;
+            }));
+            $this->log('INFO', "Positions updated successfully. Active positions: {$activeCount}");
             
         } catch (Exception $e) {
             $this->log('ERROR', "Error updating positions: " . $e->getMessage());

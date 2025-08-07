@@ -23,6 +23,18 @@ try {
 // Get enhanced dashboard data
 try {
     $dashboardData = $db->fetchOne("SELECT * FROM dashboard_summary");
+    if (!$dashboardData) {
+        $dashboardData = [
+            'active_positions' => 0,
+            'today_trades' => 0,
+            'today_pnl' => 0,
+            'today_signals' => 0,
+            'avg_confidence' => 0,
+            'portfolio_value' => 0,
+            'daily_pnl' => 0,
+            'error_count' => 0
+        ];
+    }
 } catch (Exception $e) {
     error_log("Dashboard summary view error: " . $e->getMessage());
     $dashboardData = [
@@ -39,6 +51,20 @@ try {
 
 try {
     $portfolioData = $db->fetchOne("SELECT * FROM portfolio_overview");
+    if (!$portfolioData) {
+        $portfolioData = [
+            'total_portfolio_value' => 0,
+            'spot_balance_usdt' => 0,
+            'futures_balance_usdt' => 0,
+            'total_unrealized_pnl' => 0,
+            'daily_pnl' => 0,
+            'daily_pnl_percentage' => 0,
+            'active_positions' => 0,
+            'spot_position_value' => 0,
+            'futures_position_value' => 0,
+            'last_updated' => date('Y-m-d H:i:s')
+        ];
+    }
 } catch (Exception $e) {
     error_log("Portfolio overview view error: " . $e->getMessage());
     $portfolioData = [
@@ -56,11 +82,16 @@ try {
 }
 
 // Get recent enhanced signals
-$recentSignals = $db->fetchAll("
-    SELECT * FROM ai_signals 
-    ORDER BY created_at DESC 
-    LIMIT 10
-");
+try {
+    $recentSignals = $db->fetchAll("
+        SELECT * FROM ai_signals 
+        ORDER BY created_at DESC 
+        LIMIT 10
+    ");
+} catch (Exception $e) {
+    error_log("Error loading recent signals: " . $e->getMessage());
+    $recentSignals = [];
+}
 
 // Get performance metrics
 try {
@@ -69,24 +100,56 @@ try {
         WHERE date >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)
         ORDER BY date DESC
     ");
+    if (empty($performanceMetrics)) {
+        // Create mock data for charts
+        $performanceMetrics = [
+            [
+                'date' => date('Y-m-d'),
+                'ending_balance' => 1000,
+                'total_pnl' => 0,
+                'ai_signals_executed' => 0,
+                'ai_signals_generated' => 0,
+                'winning_trades' => 0
+            ]
+        ];
+    }
 } catch (Exception $e) {
     error_log("Performance metrics error: " . $e->getMessage());
-    $performanceMetrics = [];
+    $performanceMetrics = [
+        [
+            'date' => date('Y-m-d'),
+            'ending_balance' => 1000,
+            'total_pnl' => 0,
+            'ai_signals_executed' => 0,
+            'ai_signals_generated' => 0,
+            'winning_trades' => 0
+        ]
+    ];
 }
 
 // Get active positions with enhanced data
-$activePositions = $db->fetchAll("
-    SELECT * FROM positions 
-    WHERE position_amt != 0 
-    ORDER BY unrealized_pnl DESC
-");
+try {
+    $activePositions = $db->fetchAll("
+        SELECT * FROM positions 
+        WHERE position_amt != 0 
+        ORDER BY unrealized_pnl DESC
+    ");
+} catch (Exception $e) {
+    error_log("Error loading active positions: " . $e->getMessage());
+    $activePositions = [];
+}
 
 // Get recent trades with enhanced data
-$recentTrades = $db->fetchAll("
-    SELECT * FROM trading_history 
-    ORDER BY created_at DESC 
-    LIMIT 10
-");
+try {
+    $recentTrades = $db->fetchAll("
+        SELECT * FROM trading_history 
+        ORDER BY created_at DESC 
+        LIMIT 10
+    ");
+} catch (Exception $e) {
+    error_log("Error loading recent trades: " . $e->getMessage());
+    $recentTrades = [];
+}
 
 // Get spot balances
 try {
@@ -117,58 +180,19 @@ try {
 $chartData = [];
 $priceData = [];
 try {
-    $activePairs = $db->fetchAll("SELECT symbol FROM trading_pairs WHERE enabled = 1 LIMIT 8");
+    $activePairs = $db->fetchAll("SELECT symbol FROM trading_pairs WHERE enabled = 1 LIMIT 5");
     foreach ($activePairs as $pair) {
         try {
-            // Get both spot and futures data
-            $futuresKlines = $binance->getKlines($pair['symbol'], '1h', 24);
-            
-            $spotKlines = [];
-            try {
-                $spotKlines = $spotAPI->getSpotKlines($pair['symbol'], '1h', 24);
-            } catch (Exception $e) {
-                error_log("Error getting spot klines for {$pair['symbol']}: " . $e->getMessage());
+            // Skip API calls if no credentials to speed up loading
+            if (!$binance || !$binance->hasCredentials()) {
+                continue;
             }
             
-            if (!empty($futuresKlines)) {
-                $chartData[$pair['symbol']]['futures'] = array_map(function($kline) {
-                    return [
-                        'time' => $kline[0],
-                        'open' => (float)$kline[1],
-                        'high' => (float)$kline[2],
-                        'low' => (float)$kline[3],
-                        'close' => (float)$kline[4],
-                        'volume' => (float)$kline[5]
-                    ];
-                }, $futuresKlines);
-            }
-            
-            if (!empty($spotKlines)) {
-                $chartData[$pair['symbol']]['spot'] = array_map(function($kline) {
-                    return [
-                        'time' => $kline[0],
-                        'open' => (float)$kline[1],
-                        'high' => (float)$kline[2],
-                        'low' => (float)$kline[3],
-                        'close' => (float)$kline[4],
-                        'volume' => (float)$kline[5]
-                    ];
-                }, $spotKlines);
-            }
-        } catch (Exception $e) {
-            error_log("Error getting chart data for {$pair['symbol']}: " . $e->getMessage());
-        }
-        
-        // Get current prices
-        try {
+            // Get futures ticker only (faster than klines)
             $futuresTicker = $binance->get24hrTicker($pair['symbol']);
             
-            $spotTicker = [];
-            try {
-                $spotTicker = $spotAPI->getSpotTicker($pair['symbol']);
-            } catch (Exception $e) {
-                error_log("Error getting spot ticker for {$pair['symbol']}: " . $e->getMessage());
-            }
+            // Get spot ticker (faster loading)
+            $spotTicker = $spotAPI->getSpotTicker($pair['symbol']);
             
             $priceData[$pair['symbol']] = [
                 'futures' => [
@@ -183,7 +207,8 @@ try {
                 ]
             ];
         } catch (Exception $e) {
-            error_log("Error getting price data for {$pair['symbol']}: " . $e->getMessage());
+            // Skip this pair on error to prevent blocking page load
+            continue;
         }
     }
 } catch (Exception $e) {
